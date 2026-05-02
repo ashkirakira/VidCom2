@@ -235,8 +235,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, required=True, help="JSON config containing cases and curve data.")
     ap.add_argument("--picture_root", type=Path, default=None, help="Root folder for case image directories.")
-    ap.add_argument("--out", type=Path, required=True, help="Output PDF path. SVG and PNG share the same stem.")
-    ap.add_argument("--frame_zoom", type=float, default=0.118)
+    ap.add_argument("--out_dir", type=Path, required=True, help="Output directory. Each video gets its own PDF/SVG/PNG.")
+    ap.add_argument("--video_ids", nargs="+", default=None, help="Only plot these video IDs. Default: plot all cases.")
+    ap.add_argument("--frame_zoom", type=float, default=0.06)
     ap.add_argument("--png_dpi", type=int, default=1000)
     args = ap.parse_args()
 
@@ -248,12 +249,16 @@ def main() -> None:
     if not isinstance(cases, list) or not cases:
         raise RuntimeError("Config must provide a non-empty 'cases' list.")
 
+    if args.video_ids:
+        selected = set(args.video_ids)
+        cases = [c for c in cases if c.get("id") in selected]
+        if not cases:
+            raise RuntimeError(f"None of the specified video_ids found in config.")
+
     picture_root = args.picture_root if args.picture_root is not None else args.config.parent
 
-    fig_w = float(figure_cfg.get("width", 17.0))
-    fig_h = float(figure_cfg.get("height", 7.9))
+    fig_w = float(figure_cfg.get("width", 32.0))
     curve_strip_h = float(figure_cfg.get("curve_strip_height", 0.53))
-    block_gap = float(figure_cfg.get("block_gap", -0.1))
     image_stretch_h = float(figure_cfg.get("image_stretch_h", 1.2))
     margins = figure_cfg.get("margins", {})
     margin_left = float(margins.get("left", 0.02))
@@ -261,13 +266,13 @@ def main() -> None:
     margin_top = float(margins.get("top", 0.995))
     margin_bottom = float(margins.get("bottom", 0.005))
 
+    args.out_dir.mkdir(parents=True, exist_ok=True)
     plt.style.use("seaborn-v0_8-whitegrid")
-    fig = plt.figure(figsize=(fig_w, fig_h), dpi=240)
-    gs = fig.add_gridspec(len(cases), 1, hspace=block_gap)
 
-    for i, case in enumerate(cases):
+    for case in cases:
         if not isinstance(case, dict):
             raise RuntimeError("Each case entry must be a JSON object.")
+        case_id = case.get("id", "unknown")
         image_dir = case.get("image_dir")
         curves = case.get("curves")
         if not image_dir or not isinstance(curves, dict):
@@ -277,12 +282,16 @@ def main() -> None:
         if not case_dir.is_absolute():
             case_dir = picture_root / case_dir
         if not case_dir.exists():
-            raise RuntimeError(f"Folder not found: {case_dir}")
+            print(f"SKIP {case_id}: folder not found {case_dir}")
+            continue
 
         image_paths = list_sorted_images(case_dir)
         normalized_curves = normalize_case(curves, curve_order)
 
-        ax_block = fig.add_subplot(gs[i, 0])
+        fig_h = 7.9
+        fig = plt.figure(figsize=(fig_w, fig_h), dpi=240)
+        gs = fig.add_gridspec(1, 1)
+        ax_block = fig.add_subplot(gs[0, 0])
         ax_block.axis("off")
         img_h = 1.0 - curve_strip_h
         ax_curve = ax_block.inset_axes([0.0, img_h, 1.0, curve_strip_h])
@@ -290,26 +299,19 @@ def main() -> None:
         plot_case_curve(ax_curve, normalized_curves, curve_order, colors)
         plot_case_images(ax_imgs, image_paths, frame_zoom=args.frame_zoom, image_stretch_h=image_stretch_h)
 
-    fig.subplots_adjust(
-        left=margin_left,
-        right=margin_right,
-        top=margin_top,
-        bottom=margin_bottom,
-    )
+        fig.subplots_adjust(
+            left=margin_left, right=margin_right,
+            top=margin_top, bottom=margin_bottom,
+        )
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    out_pdf = args.out
-    out_svg = out_pdf.with_suffix(".svg")
-    out_png = out_pdf.with_suffix(".png")
-
-    fig.savefig(out_pdf, bbox_inches="tight")
-    fig.savefig(out_svg, format="svg", bbox_inches="tight")
-    fig.savefig(out_png, format="png", dpi=int(args.png_dpi), bbox_inches="tight")
-    plt.close(fig)
-
-    print(f"Saved: {out_pdf}")
-    print(f"Saved: {out_svg}")
-    print(f"Saved: {out_png}")
+        out_pdf = args.out_dir / f"{case_id}.pdf"
+        out_svg = args.out_dir / f"{case_id}.svg"
+        out_png = args.out_dir / f"{case_id}.png"
+        fig.savefig(out_pdf, bbox_inches="tight")
+        fig.savefig(out_svg, format="svg", bbox_inches="tight")
+        fig.savefig(out_png, format="png", dpi=int(args.png_dpi), bbox_inches="tight")
+        plt.close(fig)
+        print(f"  {case_id} -> {out_pdf}")
 
 
 if __name__ == "__main__":
