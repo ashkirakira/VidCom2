@@ -166,11 +166,14 @@ def process_single_video(
         all_scales.append(scales.cpu().tolist())
         all_ks.append(ks)
 
+    flat_scales = [s for seg in all_scales for s in seg]
+    flat_ks = [k for seg in all_ks for k in seg]
+
     return {
         "actual_frames": actual_frames,
         "frame_tokens": all_frame_tokens[0] if all_frame_tokens else 0,
-        "scales": all_scales[0] if all_scales else [],
-        "ks": all_ks[0] if all_ks else [],
+        "scales": flat_scales,
+        "ks": flat_ks,
         "r_ratio": R_RATIO,
         "raw_video_tensor": raw_video_tensor,
     }
