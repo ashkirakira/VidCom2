@@ -65,8 +65,8 @@ def extract_and_save_frames(
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: List[Path] = []
     for i in range(video_tensor.shape[0]):
-        frame = video_tensor[i].cpu().clamp(0, 1)
-        img = Image.fromarray((frame.permute(1, 2, 0).numpy() * 255).astype(np.uint8))
+        frame = video_tensor[i].cpu().clamp(0, 255)
+        img = Image.fromarray(frame.permute(1, 2, 0).numpy().astype(np.uint8))
         p = output_dir / f"frame_{i:03d}.jpg"
         img.save(p, quality=95)
         paths.append(p)
