@@ -1,4 +1,6 @@
+import os
 import time
+from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -93,6 +95,19 @@ class Qwen3_VL(Qwen3_VLSimple):
             if video_inputs is not None:
                 video_inputs, video_metadatas = zip(*video_inputs)
                 video_inputs, video_metadatas = list(video_inputs), list(video_metadatas)
+
+            if os.getenv("DUMP_BUDGET") and video_inputs:
+                doc = self.task_dict[task[0]][split[0]][doc_id[0]]
+                video_id = doc.get("videoID", str(doc_id[0]))
+                from token_compressor.vidcom2.models import qwen3_vl as _vidcom2_qwen3vl
+                _vidcom2_qwen3vl._current_video_id = video_id
+
+                dump_dir = Path(os.getenv("DUMP_BUDGET_DIR", "./budget_data")) / video_id
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                frames = video_inputs[0]  # (T, C, H, W), float32 in [0, 255]
+                for i in range(frames.shape[0]):
+                    arr = frames[i].clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
+                    Image.fromarray(arr).save(dump_dir / f"frame_{i:03d}.jpg", quality=95)
 
             if self.batch_size > 1:
                 inputs = self.processor(text=texts, images=image_inputs, videos=video_inputs, video_metadata=video_metadatas, **video_kwargs, do_resize=False, padding=True, padding_side="left", return_tensors="pt")
