@@ -215,18 +215,25 @@ def plot_case_curve(
     ax.axis("off")
 
 
-def plot_case_images(ax: plt.Axes, image_paths: List[Path], frame_zoom: float, image_stretch_h: float) -> None:
+def plot_case_images(
+    ax: plt.Axes,
+    image_paths: List[Path],
+    frame_zoom: float,
+    image_stretch_h: float,
+    frame_size_scale: float = 1.0,
+) -> None:
     num_frames = len(image_paths)
     ax.set_xlim(-0.5, num_frames - 0.5)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
 
+    effective_zoom = frame_zoom * float(frame_size_scale)
     for i, p in enumerate(image_paths):
         img = load_rgb_image(p)
         h, w = img.shape[:2]
         new_h = max(1, int(round(h * image_stretch_h)))
         img = np.asarray(Image.fromarray(img).resize((w, new_h), Image.Resampling.BICUBIC))
-        oi = OffsetImage(img, zoom=frame_zoom, interpolation="bicubic")
+        oi = OffsetImage(img, zoom=effective_zoom, interpolation="bicubic")
         ab = AnnotationBbox(oi, (i, 1.0), frameon=False, box_alignment=(0.5, 1.0))
         ax.add_artist(ab)
 
@@ -235,10 +242,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, required=True, help="JSON config containing cases and curve data.")
     ap.add_argument("--picture_root", type=Path, default=None, help="Root folder for case image directories.")
-    ap.add_argument("--out_dir", type=Path, required=True, help="Output directory. Each video gets its own PDF/SVG/PNG.")
+    ap.add_argument("--out_dir", type=Path, required=True, help="Output directory. Each video gets its own file per format.")
     ap.add_argument("--video_ids", nargs="+", default=None, help="Only plot these video IDs. Default: plot all cases.")
     ap.add_argument("--frame_zoom", type=float, default=0.06)
     ap.add_argument("--png_dpi", type=int, default=1000)
+    ap.add_argument(
+        "--formats",
+        nargs="+",
+        choices=["pdf", "svg", "png"],
+        default=["pdf"],
+        help="Which file formats to save. Default: pdf only.",
+    )
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -288,6 +302,21 @@ def main() -> None:
         image_paths = list_sorted_images(case_dir)
         normalized_curves = normalize_case(curves, curve_order)
 
+        # 帧图数量可能是曲线点数的整数倍（每 N 帧合并成一个 budget），
+        # 按步长抽样保证画图与 budget.json 一一对应。
+        # step 同时也是每张图横向应放大的倍数，否则槽位变宽会出现缝。
+        num_curve_points = len(next(iter(normalized_curves.values())))
+        frame_size_scale = 1.0
+        if len(image_paths) != num_curve_points:
+            if len(image_paths) % num_curve_points != 0:
+                raise RuntimeError(
+                    f"{case_id}: {len(image_paths)} frames not divisible by "
+                    f"{num_curve_points} curve points"
+                )
+            step = len(image_paths) // num_curve_points
+            image_paths = image_paths[::step]
+            frame_size_scale = float(step)
+
         fig_h = 7.9
         fig = plt.figure(figsize=(fig_w, fig_h), dpi=240)
         gs = fig.add_gridspec(1, 1)
@@ -297,21 +326,35 @@ def main() -> None:
         ax_curve = ax_block.inset_axes([0.0, img_h, 1.0, curve_strip_h])
         ax_imgs = ax_block.inset_axes([0.0, 0.0, 1.0, img_h])
         plot_case_curve(ax_curve, normalized_curves, curve_order, colors)
-        plot_case_images(ax_imgs, image_paths, frame_zoom=args.frame_zoom, image_stretch_h=image_stretch_h)
+        plot_case_images(
+            ax_imgs,
+            image_paths,
+            frame_zoom=args.frame_zoom,
+            image_stretch_h=image_stretch_h,
+            frame_size_scale=frame_size_scale,
+        )
 
         fig.subplots_adjust(
             left=margin_left, right=margin_right,
             top=margin_top, bottom=margin_bottom,
         )
 
-        out_pdf = args.out_dir / f"{case_id}.pdf"
-        out_svg = args.out_dir / f"{case_id}.svg"
-        out_png = args.out_dir / f"{case_id}.png"
-        fig.savefig(out_pdf, bbox_inches="tight")
-        fig.savefig(out_svg, format="svg", bbox_inches="tight")
-        fig.savefig(out_png, format="png", dpi=int(args.png_dpi), bbox_inches="tight")
+        formats = set(args.formats)
+        saved: list[Path] = []
+        if "pdf" in formats:
+            out_pdf = args.out_dir / f"{case_id}.pdf"
+            fig.savefig(out_pdf, bbox_inches="tight")
+            saved.append(out_pdf)
+        if "svg" in formats:
+            out_svg = args.out_dir / f"{case_id}.svg"
+            fig.savefig(out_svg, format="svg", bbox_inches="tight")
+            saved.append(out_svg)
+        if "png" in formats:
+            out_png = args.out_dir / f"{case_id}.png"
+            fig.savefig(out_png, format="png", dpi=int(args.png_dpi), bbox_inches="tight")
+            saved.append(out_png)
         plt.close(fig)
-        print(f"  {case_id} -> {out_pdf}")
+        print(f"  {case_id} -> {', '.join(str(p) for p in saved)}")
 
 
 if __name__ == "__main__":

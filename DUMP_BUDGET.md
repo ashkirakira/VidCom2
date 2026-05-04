@@ -8,6 +8,7 @@
 
 1. **`--batch_size 1`**
    - dump 代码用 `doc_id[0]` / `video_inputs[0]` 取当前样本
+   - `DUMP_BUDGET_FILTER` 也用 `doc_id[0]` 取 videoID 做白名单匹配
    - batch_size > 1 时只会 dump 每个 batch 的第一个样本，后面的样本被丢弃
 
 2. **`COMPRESSOR=vidcom2`**
@@ -37,6 +38,20 @@ accelerate launch --num_processes=8 -m lmms_eval \
   --log_samples_suffix dump_budget \
   --output_path ./logs/
 ```
+
+## 只 dump 部分 videoID（DUMP_BUDGET_FILTER）
+
+`DUMP_BUDGET_FILTER` 指向一个文本文件（每行一个 videoID）。命中白名单的样本走完整推理 + dump，其他样本直接跳过 `model.generate`，进度条前进但不做任何 GPU 工作。
+
+适合"只关心 139 个退化视频"的场景，避免跑全量 900 道题。
+
+```bash
+export DUMP_BUDGET=1
+export DUMP_BUDGET_FILTER=./degraded_video_ids.txt   # 每行一个 videoID
+# 其他参数同上
+```
+
+注意：lmms-eval 最后会算评测指标，跳过的样本回答是空字符串，会被算作错误——所以**指标不可信**，只看 budget_data/ 里 dump 的内容就行。
 
 ## 禁止用法
 

@@ -61,8 +61,28 @@ class Qwen3_VL(Qwen3_VLSimple):
         pbar = tqdm(total=num_iters, disable=(self.rank != 0), desc="Model Responding")
         e2e_latency = 0
         total_tokens = 0
+
+        # DUMP_BUDGET_FILTER: optional path to a text file (one videoID per line).
+        # If set, samples whose videoID is not in the whitelist skip model.generate
+        # and return a dummy answer. Used to dump budget for a subset of videos
+        # without running inference on the full dataset.
+        filter_path = os.getenv("DUMP_BUDGET_FILTER")
+        filtered_videos: Optional[set] = None
+        if filter_path:
+            with open(filter_path) as f:
+                filtered_videos = {line.strip() for line in f if line.strip()}
+            eval_logger.info(f"[DUMP_BUDGET_FILTER] only processing {len(filtered_videos)} videoIDs from {filter_path}")
+
         for chunk in chunks:
             ctx, doc_to_messages, all_gen_kwargs, doc_id, task, split = zip(*chunk)
+
+            if filtered_videos is not None:
+                doc = self.task_dict[task[0]][split[0]][doc_id[0]]
+                if doc.get("videoID") not in filtered_videos:
+                    res.append("")  # skip: will be reordered back by re_ords.get_original
+                    pbar.update(1)
+                    continue
+
             chat_messages = [doc_to_messages[idx](self.task_dict[task][split][ids]) for idx, (ids, task, split) in enumerate(zip(doc_id, task, split))]
             chat_messages: List[ChatMessages] = [ChatMessages(**{"messages": message}) for message in chat_messages]
             visuals = []
