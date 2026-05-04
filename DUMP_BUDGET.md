@@ -14,11 +14,12 @@
    - 帧图片由 `chat/qwen3_vl.py` 保存，曲线数据由 `token_compressor/vidcom2/models/qwen3_vl.py` 保存
    - 如果没开 vidcom2（baseline 或其他压缩方法），`Qwen3VLModel_forward` 不会被 patch，`budget.json` 不会被写
 
-3. **`--num_processes=1`**
-   - 进程间通过模块级变量 `_current_video_id` 传递 video_id
-   - 多进程会竞争同一个变量，导致 video_id 串位，JSON 内容对应到错误的视频
-
 **违反以上任一条件，输出数据会是错的或缺失的。**
+
+**关于多进程（`--num_processes=N`）：安全。**
+每个进程是独立的 Python 解释器，各自维护自己的 `_current_video_id`，
+accelerate 按 rank 把数据集切成不相交子集分给各进程，不会串位。
+单卡装不下 8B 模型时请用 `--num_processes=8`（和 baseline 实验保持一致）。
 
 ## 正确用法
 
@@ -27,7 +28,7 @@ source /mnt/cpfs/gaoyizhuo-20260417/setup_env.sh
 export COMPRESSOR=vidcom2 R_RATIO=0.25
 export DUMP_BUDGET=1 DUMP_BUDGET_DIR=./budget_data/
 
-accelerate launch --num_processes=1 -m lmms_eval \
+accelerate launch --num_processes=8 -m lmms_eval \
   --model qwen3_vl \
   --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,attn_implementation=flash_attention_2,max_num_frames=32 \
   --tasks videomme \
@@ -40,7 +41,6 @@ accelerate launch --num_processes=1 -m lmms_eval \
 ## 禁止用法
 
 - **baseline 实验（`COMPRESSOR` 不设）+ `DUMP_BUDGET=1`**：不会生成曲线数据，只有帧图片。无意义。
-- **多卡 `accelerate launch --num_processes=8` + `DUMP_BUDGET=1`**：video_id 会串位。
 - **`--batch_size 2` 或更大 + `DUMP_BUDGET=1`**：只会 dump 每个 batch 的第一个样本。
 
 ## 输出
