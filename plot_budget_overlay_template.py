@@ -245,6 +245,13 @@ def main() -> None:
     ap.add_argument("--out_dir", type=Path, required=True, help="Output directory. Each video gets its own file per format.")
     ap.add_argument("--video_ids", nargs="+", default=None, help="Only plot these video IDs. Default: plot all cases.")
     ap.add_argument("--frame_zoom", type=float, default=0.06)
+    ap.add_argument(
+        "--base_frame_count",
+        type=int,
+        default=64,
+        help="Reference slot count that --frame_zoom was tuned for. Each image is "
+        "scaled by base_frame_count / num_curve_points to fill the wider slot.",
+    )
     ap.add_argument("--png_dpi", type=int, default=1000)
     ap.add_argument(
         "--formats",
@@ -304,9 +311,7 @@ def main() -> None:
 
         # 帧图数量可能是曲线点数的整数倍（每 N 帧合并成一个 budget），
         # 按步长抽样保证画图与 budget.json 一一对应。
-        # step 同时也是每张图横向应放大的倍数，否则槽位变宽会出现缝。
         num_curve_points = len(next(iter(normalized_curves.values())))
-        frame_size_scale = 1.0
         if len(image_paths) != num_curve_points:
             if len(image_paths) % num_curve_points != 0:
                 raise RuntimeError(
@@ -315,7 +320,11 @@ def main() -> None:
                 )
             step = len(image_paths) // num_curve_points
             image_paths = image_paths[::step]
-            frame_size_scale = float(step)
+
+        # 每个槽位的宽度 = fig_w / num_curve_points；--frame_zoom 是在
+        # base_frame_count 个槽时调出的值。槽位越少（曲线点越少），每张图需要
+        # 按比例放大以填满槽位，否则相邻帧之间出现空隙。
+        frame_size_scale = args.base_frame_count / float(num_curve_points)
 
         fig_h = 7.9
         fig = plt.figure(figsize=(fig_w, fig_h), dpi=240)
