@@ -2,6 +2,7 @@ from typing import Optional, Union, List
 import os
 import torch
 from torch import Tensor
+import torch.nn.functional as F
 from transformers.cache_utils import Cache
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLModelOutputWithPast,
@@ -14,6 +15,7 @@ from token_compressor.vidcom2 import (
     compute_scales,
     select_outlier_indices,
     _map_linear_offset,
+    compute_local_variation,
 )
 
 
@@ -28,7 +30,16 @@ def _compute_keep_indices(
 
     sel_feat = select_low_var_channels(flat_features)
     vid_score, frame_score = compute_gaussian_scores(sel_feat, frame_tokens)
-    scales = compute_scales(-vid_score.mean(dim=-1), base_scale)
+
+    local_variation = -compute_local_variation(sel_feat, frame_tokens).squeeze(-1)
+    local_variation_norm = F.normalize(local_variation, p=2, dim=0)
+    global_uniqueness = -vid_score.mean(dim=-1)
+    global_uniqueness_norm = F.normalize(global_uniqueness, p=2, dim=0)
+
+    combined_tail = (global_uniqueness_norm[1:] + local_variation_norm) / 2
+    frame_budgeting = torch.cat([global_uniqueness_norm[0:1], combined_tail]) # the more unique, the higher the frame_budgeting
+    
+    scales = compute_scales(frame_budgeting, base_scale)
     indices = select_outlier_indices(vid_score + frame_score, scales, frame_tokens)
     return _map_linear_offset(indices, frame_tokens)
 

@@ -27,9 +27,17 @@ def vidcom2_compression(flattened_feat: torch.Tensor, model: str = "llava_ov",
     sel_feat = select_low_var_channels(flattened_feat)
     vid_score, frame_score = compute_gaussian_scores(sel_feat, tpf)
 
+    local_variation = -compute_local_variation(sel_feat, tpf).squeeze(-1)
+    local_variation_norm = F.normalize(local_variation, p=2, dim=0)
+    global_uniqueness = -vid_score.mean(dim=-1)
+    global_uniqueness_norm = F.normalize(global_uniqueness, p=2, dim=0)
+
+    combined_tail = (global_uniqueness_norm[1:] + local_variation_norm) / 2
+    frame_budgeting = torch.cat([global_uniqueness_norm[0:1], combined_tail]) # the more unique, the higher the frame_budgeting
     # 2. Score Fusion & Selection (Hardcoded: Outlier Retention)
     # Strategy: Keep tokens different from both Global Video Mean and Local Frame Mean
-    scales = compute_scales(-vid_score.mean(dim=-1), base_scale)
+    scales = compute_scales(frame_budgeting, base_scale)
+
     indices = select_outlier_indices(vid_score + frame_score, scales, tpf)
 
     # 3. Index Mapping (Routes to linear or grid mapper)
@@ -55,6 +63,14 @@ def compute_gaussian_scores(x: torch.Tensor, tpf: int) -> Tuple[torch.Tensor, to
     v_score = _multi_scale_gaussian(frames, vid_center, alphas)
     f_score = _multi_scale_gaussian(frames, frame_center, alphas)
     return v_score, f_score
+
+def compute_local_variation(sel_feat: torch.Tensor, tpf: int) -> torch.Tensor:
+    frames = sel_feat.view(-1, tpf, sel_feat.shape[-1])
+    frames = F.normalize(frames, dim=-1)
+    frame_center = frames.mean(dim=1, keepdim=True)
+    alphas = [2**k for k in range(-3, 2)]
+    local_variation = _multi_scale_gaussian(frame_center[:-1], frame_center[1:], alphas)
+    return local_variation
 
 def _multi_scale_gaussian(x: torch.Tensor, center: torch.Tensor, alphas: List[float]) -> torch.Tensor:
     """Helper: vectorized multi-scale Gaussian kernel."""
