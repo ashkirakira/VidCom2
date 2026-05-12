@@ -54,3 +54,5 @@ remote_code/*
 budget_data/
 budget_vis/
 plan.md
+vis_out_32f/
+vis_out_64f/
