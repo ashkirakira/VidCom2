@@ -56,3 +56,7 @@ budget_vis/
 plan.md
 vis_out_32f/
 vis_out_64f/
+vis_out_32f_with_q/
+*.pdf
+*.png
+*.jpg
