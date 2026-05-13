@@ -28,16 +28,14 @@ def vidcom2_compression(flattened_feat: torch.Tensor, model: str = "llava_ov",
     vid_score, frame_score = compute_gaussian_scores(sel_feat, tpf)
 
     local_variation = -compute_local_variation(sel_feat, tpf).squeeze(-1)
-    local_variation_norm = F.normalize(local_variation, p=2, dim=0)
-    global_uniqueness = -vid_score.mean(dim=-1)
-    global_uniqueness_norm = F.normalize(global_uniqueness, p=2, dim=0)
 
-    combined_tail = (global_uniqueness_norm[1:] + local_variation_norm) / 2
-    frame_budgeting = torch.cat([global_uniqueness_norm[0:1], combined_tail]) # the more unique, the higher the frame_budgeting
     # 2. Score Fusion & Selection (Hardcoded: Outlier Retention)
     # Strategy: Keep tokens different from both Global Video Mean and Local Frame Mean
-    scales = compute_scales(frame_budgeting, base_scale)
+    scales = compute_scales(local_variation, base_scale, temp=0.2)
 
+    prefix = torch.full((1,), base_scale, device=scales.device, dtype=scales.dtype)
+    scales = torch.cat([prefix, scales], dim=0)
+    
     indices = select_outlier_indices(vid_score + frame_score, scales, tpf)
 
     # 3. Index Mapping (Routes to linear or grid mapper)
