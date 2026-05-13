@@ -1,5 +1,8 @@
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Tuple
+import json
 import os
+from pathlib import Path
+
 import torch
 from torch import Tensor
 import torch.nn.functional as F
@@ -12,36 +15,57 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 from token_compressor.vidcom2 import (
     select_low_var_channels,
     compute_gaussian_scores,
+    compute_local_variation,
     compute_scales,
     select_outlier_indices,
     _map_linear_offset,
-    compute_local_variation,
 )
+
+
+# Set by lmms_eval/models/chat/qwen3_vl.py before model.generate() to identify
+# the current sample. Read here when DUMP_BUDGET=1 to name the output directory.
+_current_video_id: Optional[str] = None
 
 
 def _compute_keep_indices(
     flat_features: Tensor, grid_thw: Tensor, spatial_merge_size: int, base_scale: float
-) -> Tensor:
-    """Runs VidCom2 scoring to obtain kept token indices for a single video."""
+) -> Tuple[Tensor, Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor]]:
+    """Runs VidCom2 scoring; returns (kept_indices, scales, raw + 6 norm variants)."""
     t, h, w = grid_thw.tolist()
     frame_tokens = (h * w) // (spatial_merge_size ** 2)
     if frame_tokens <= 0 or flat_features.numel() == 0:
-        return torch.arange(flat_features.shape[0], device=flat_features.device)
+        return torch.arange(flat_features.shape[0], device=flat_features.device), None, None, None, None, None, None, None, None, None
 
     sel_feat = select_low_var_channels(flat_features)
     vid_score, frame_score = compute_gaussian_scores(sel_feat, frame_tokens)
 
     local_variation = -compute_local_variation(sel_feat, frame_tokens).squeeze(-1)
-    local_variation_norm = F.normalize(local_variation, p=2, dim=0)
-    global_uniqueness = -vid_score.mean(dim=-1)
-    global_uniqueness_norm = F.normalize(global_uniqueness, p=2, dim=0)
+    local_variation_norm_l2 = F.normalize(local_variation, p=2, dim=0)
+    local_variation_z_score = (local_variation - local_variation.mean()) / (local_variation.std() + 1e-8)
+    local_variation_norm_minmax = (local_variation - local_variation.min()) / (local_variation.max() - local_variation.min() + 1e-8)
 
-    combined_tail = (global_uniqueness_norm[1:] + local_variation_norm) / 2
-    frame_budgeting = torch.cat([global_uniqueness_norm[0:1], combined_tail]) # the more unique, the higher the frame_budgeting
-    
+    global_uniqueness = -vid_score.mean(dim=-1)
+    global_uniqueness_norm_l2 = F.normalize(global_uniqueness, p=2, dim=0)
+    global_uniqueness_z_score = (global_uniqueness - global_uniqueness.mean()) / (global_uniqueness.std() + 1e-8)
+    global_uniqueness_norm_minmax = (global_uniqueness - global_uniqueness.min()) / (global_uniqueness.max() - global_uniqueness.min() + 1e-8)
+
+    combined_tail = (global_uniqueness_norm_l2[1:] + local_variation_norm_l2) / 2
+    frame_budgeting = torch.cat([global_uniqueness_norm_l2[0:1], combined_tail])
+
     scales = compute_scales(frame_budgeting, base_scale)
     indices = select_outlier_indices(vid_score + frame_score, scales, frame_tokens)
-    return _map_linear_offset(indices, frame_tokens)
+    return (
+        _map_linear_offset(indices, frame_tokens),
+        scales,
+        local_variation,
+        local_variation_norm_l2,
+        local_variation_z_score,
+        local_variation_norm_minmax,
+        global_uniqueness,
+        global_uniqueness_norm_l2,
+        global_uniqueness_z_score,
+        global_uniqueness_norm_minmax,
+    )
 
 
 def Qwen3VLModel_forward(
@@ -156,9 +180,24 @@ def Qwen3VLModel_forward(
         kept_video_chunks: List[Tensor] = []
         kept_deepstack: List[List[Tensor]] = [[] for _ in deepstack_splits]
         offset = 0
+        dump_enabled = bool(os.getenv("DUMP_BUDGET"))
+        dump_scales: List[float] = []
+        dump_frame_tokens = 0
+        dump_lv_l2: List[float] = []
+        dump_lv_z: List[float] = []
+        dump_lv_mm: List[float] = []
+        dump_gu_l2: List[float] = []
+        dump_gu_z: List[float] = []
+        dump_gu_mm: List[float] = []
+        dump_lv_raw: List[float] = []
+        dump_gu_raw: List[float] = []
 
         for grid, feat in zip(video_grid_thw, video_splits):
-            keep_local = _compute_keep_indices(
+            (
+                keep_local, seg_scales,
+                lv_raw, lv_l2, lv_z, lv_mm,
+                gu_raw, gu_l2, gu_z, gu_mm,
+            ) = _compute_keep_indices(
                 flat_features=feat,
                 grid_thw=grid,
                 spatial_merge_size=merge_size,
@@ -169,6 +208,39 @@ def Qwen3VLModel_forward(
             for layer_idx, split_list in enumerate(deepstack_splits):
                 kept_deepstack[layer_idx].append(split_list.pop(0)[keep_local])
             offset += feat.shape[0]
+
+            if dump_enabled and seg_scales is not None:
+                dump_scales.extend(seg_scales.cpu().tolist())
+                dump_lv_raw.extend(lv_raw.cpu().tolist())
+                dump_lv_l2.extend(lv_l2.cpu().tolist())
+                dump_lv_z.extend(lv_z.cpu().tolist())
+                dump_lv_mm.extend(lv_mm.cpu().tolist())
+                dump_gu_raw.extend(gu_raw.cpu().tolist())
+                dump_gu_l2.extend(gu_l2.cpu().tolist())
+                dump_gu_z.extend(gu_z.cpu().tolist())
+                dump_gu_mm.extend(gu_mm.cpu().tolist())
+                h, w = grid[1].item(), grid[2].item()
+                dump_frame_tokens = (h * w) // (merge_size ** 2)
+
+        if dump_enabled and _current_video_id and dump_scales:
+            dump_dir = Path(os.getenv("DUMP_BUDGET_DIR", "./norm_data")) / _current_video_id
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            ks = [max(1, round(s * dump_frame_tokens)) for s in dump_scales]
+            with (dump_dir / "budget.json").open("w") as f:
+                json.dump({
+                    "scales": dump_scales,
+                    "ks": ks,
+                    "frame_tokens": dump_frame_tokens,
+                    "r_ratio": base_scale,
+                    "local_variation": dump_lv_raw,
+                    "local_variation_norm_l2": dump_lv_l2,
+                    "local_variation_z_score": dump_lv_z,
+                    "local_variation_norm_minmax": dump_lv_mm,
+                    "global_uniqueness": dump_gu_raw,
+                    "global_uniqueness_norm_l2": dump_gu_l2,
+                    "global_uniqueness_z_score": dump_gu_z,
+                    "global_uniqueness_norm_minmax": dump_gu_mm,
+                }, f, indent=2)
 
         kept_indices = torch.sort(torch.cat(kept_indices)).values
         video_embeds = torch.cat(kept_video_chunks, dim=0)

@@ -1,3 +1,4 @@
+import os
 import time
 from typing import List, Optional, Tuple, Union
 
@@ -93,6 +94,12 @@ class Qwen3_VL(Qwen3_VLSimple):
             if video_inputs is not None:
                 video_inputs, video_metadatas = zip(*video_inputs)
                 video_inputs, video_metadatas = list(video_inputs), list(video_metadatas)
+
+            if os.getenv("DUMP_BUDGET") and video_inputs:
+                doc = self.task_dict[task[0]][split[0]][doc_id[0]]
+                video_id = doc.get("videoID", str(doc_id[0]))
+                from token_compressor.vidcom2.models import qwen3_vl as _vidcom2_qwen3vl
+                _vidcom2_qwen3vl._current_video_id = video_id
 
             if self.batch_size > 1:
                 inputs = self.processor(text=texts, images=image_inputs, videos=video_inputs, video_metadata=video_metadatas, **video_kwargs, do_resize=False, padding=True, padding_side="left", return_tensors="pt")
