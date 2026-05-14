@@ -57,3 +57,10 @@ remote_code/*
 vis_out_32f/
 vis_out_32f_with_q/
 vis_out_64f/
+
+vis_out*/
+videomme*/
+
+/*.log
+plot_config*
+/*data*/
