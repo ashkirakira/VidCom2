@@ -57,3 +57,7 @@ remote_code/*
 vis_out_32f/
 vis_out_32f_with_q/
 vis_out_64f/
+
+*命令.txt
+
+videomme_64f*/

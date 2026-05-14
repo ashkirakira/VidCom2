@@ -39,13 +39,10 @@ def _compute_keep_indices(
     sel_feat = select_low_var_channels(flat_features)
     vid_score, frame_score = compute_gaussian_scores(sel_feat, frame_tokens)
 
-    local_variation = -compute_local_variation(sel_feat, frame_tokens).squeeze(-1)
+    global_uniqueness = -vid_score.mean(dim=-1)
 
-    scales = compute_scales(local_variation, base_scale, temp=0.2)
 
-    prefix = torch.full((1,), base_scale, device=scales.device, dtype=scales.dtype)
-    scales = torch.cat([prefix, scales], dim=0)
-
+    scales = compute_scales(global_uniqueness, base_scale, temp=0.1)
     indices = select_outlier_indices(vid_score + frame_score, scales, frame_tokens)
     return _map_linear_offset(indices, frame_tokens), scales
 
