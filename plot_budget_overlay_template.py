@@ -61,10 +61,20 @@ except Exception:
 
 
 DEFAULT_COLORS = {
-    "VidCom2": "#6BB983",
+    "Global Uniqueness": "#6BB983",
+    "Local Variation": "#E8845C",
+    "Global+Local": "#5B8BD4",
     "Uniform": "#A9A9A9",
 }
-DEFAULT_CURVE_ORDER = ["Uniform", "VidCom2"]
+DEFAULT_CURVE_ORDER = ["Uniform", "Global Uniqueness", "Local Variation", "Global+Local"]
+
+CURVE_STYLES: Dict[str, Dict] = {
+    "Uniform": {"linestyle": "--", "linewidth": 1.6, "alpha": 0.22},
+    "Global Uniqueness": {"linestyle": "-", "linewidth": 2.5, "alpha": 0.24},
+    "Local Variation": {"linestyle": "-", "linewidth": 2.5, "alpha": 0.24},
+    "Global+Local": {"linestyle": "-", "linewidth": 3.0, "alpha": 0.26},
+}
+_DEFAULT_STYLE = {"linestyle": "-", "linewidth": 2.5, "alpha": 0.24}
 
 
 def _catmull_rom_dense(y: np.ndarray, points: int) -> np.ndarray:
@@ -202,11 +212,15 @@ def plot_case_curve(
         yd = np.clip(yd, 0.0, 1.0)
         ymax_parts.append(vals_aug)
 
-        alpha = 0.22 if name == "Uniform" else 0.24
-        linestyle = "--" if name == "Uniform" else "-"
-        linewidth = 1.6 if name == "Uniform" else 2.5
-        ax.fill_between(xd, yd, 0.0, color=colors[name], alpha=alpha, zorder=zorder)
-        ax.plot(xd, yd, color=colors[name], linewidth=linewidth, linestyle=linestyle, zorder=zorder + 6)
+        style = CURVE_STYLES.get(name, _DEFAULT_STYLE)
+        ax.fill_between(xd, yd, 0.0, color=colors[name], alpha=style["alpha"], zorder=zorder)
+        ax.plot(
+            xd, yd,
+            color=colors[name],
+            linewidth=style["linewidth"],
+            linestyle=style["linestyle"],
+            zorder=zorder + len(curve_order) + 1,
+        )
 
     ymax = np.nanmax(np.concatenate(ymax_parts))
     pad_up = max(0.02, 0.06 * (ymax + 1e-8))

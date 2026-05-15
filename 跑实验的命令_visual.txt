@@ -1,0 +1,195 @@
+================================================================
+对比实验：Qwen3-VL · VideoMME · 32 帧
+模型：Qwen3-VL-8B-Instruct
+================================================================
+目的：对比"无压缩 baseline" vs "VidCom2 R=25% 压缩"在 VideoMME 上的逐题答题情况
+
+运行前先激活环境：
+  source /mnt/cpfs/gaoyizhuo-20260417/setup_env.sh
+
+注意：8 卡全占，两条命令必须串行（跑完一个再起下一个）
+
+================================================================
+【1】Baseline（无压缩）· Max=64 · VideoMME
+================================================================
+setsid bash -c '
+source /mnt/cpfs/gaoyizhuo-20260417/setup_env.sh
+unset COMPRESSOR R_RATIO
+accelerate launch --num_processes=8 \
+  -m lmms_eval \
+  --model qwen3_vl \
+  --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,attn_implementation=flash_attention_2,max_num_frames=64 \
+  --tasks videomme \
+  --batch_size 1 \
+  --log_samples \
+  --log_samples_suffix baseline_32f_videomme \
+  --output_path ./logs/
+' > run_baseline_32f_videomme.log 2>&1 < /dev/null & disown
+
+================================================================
+【2】VidCom2 · Max=32 · R=25% · VideoMME
+================================================================
+setsid bash -c '
+source /mnt/cpfs/gaoyizhuo-20260417/setup_env.sh
+export COMPRESSOR=vidcom2 R_RATIO=0.25
+accelerate launch --num_processes=8 \
+  -m lmms_eval \
+  --model qwen3_vl \
+  --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,attn_implementation=flash_attention_2,max_num_frames=32 \
+  --tasks videomme \
+  --batch_size 1 \
+  --log_samples \
+  --log_samples_suffix vidcom2_32f_r25_videomme \
+  --output_path ./logs/
+' > run_vidcom2_32f_r25_videomme.log 2>&1 < /dev/null & disown
+
+================================================================
+【查看进度】
+================================================================
+tail -f run_baseline_32f_videomme.log         # 实验1
+tail -f run_vidcom2_32f_r25_videomme.log      # 实验2
+
+pgrep -af lmms_eval                            # 看哪些还在跑
+nvidia-smi                                     # 看 GPU
+
+================================================================
+【跑完后定位 jsonl】
+================================================================
+# log 里 lmms-eval 会打这一行：Saving samples to ./logs/.../<date_id>_samples_videomme.jsonl
+# 用 grep 直接抓出来：
+grep "Saving samples" run_baseline_32f_videomme.log
+grep "Saving samples" run_vidcom2_32f_r25_videomme.log
+
+================================================================
+【对比结果】这里的文件名只是示例，不要直接复制啊
+================================================================
+# 找出 baseline 答对但 vidcom2 答错的题目
+python tools/compare_results.py \
+  logs/Qwen__Qwen3-VL-8B-Instruct/20260428_132517_samples_videomme.jsonl \
+  logs/Qwen__Qwen3-VL-8B-Instruct/20260428_141330_samples_videomme.jsonl \
+  | tee logs/compare_baseline_vs_vidcom2_32f.txt
+================================================================
+
+
+================================================================
+可视化：VidCom2 在退化样本上的 per-frame token budget
+模型：Qwen3-VL-8B-Instruct · 32帧 · R=25%
+================================================================
+目的：对 151 道退化题（baseline 对、vidcom2 错）对应的 139 个视频，
+      可视化每帧保留了多少 token，观察 budget 分配是否合理
+
+实现方式：
+  dump 逻辑集成在推理管线里（见 DUMP_BUDGET.md），通过 DUMP_BUDGET=1 开启。
+  复用实验的真实预处理，不会出现复刻偏差。
+
+================================================================
+【0】拉新代码 + 清理旧数据（服务器上）
+================================================================
+# git pull：把 GitHub 上的最新提交拉到当前分支
+# rm -rf：递归删除目录，旧数据全是错的，都删掉
+git pull
+rm -rf budget_data/ budget_vis/
+
+================================================================
+【3a】小规模测试（--limit 64 + FILTER，验证白名单 dump 正确）
+================================================================
+# 必须满足的约束（见 DUMP_BUDGET.md）：
+#   --batch_size 1        dump 代码取 chunk[0]，batch>1 会丢样本
+#   COMPRESSOR=vidcom2    只有 vidcom2 的 forward 会写 budget.json
+#
+# 多进程（--num_processes=8）安全：每个进程独立 Python 解释器，
+# 各自维护自己的 _current_video_id，互不干扰。和 baseline 实验一致用 8 卡。
+#
+# 环境变量：
+#   COMPRESSOR=vidcom2               开启 VidCom2 压缩
+#   R_RATIO=0.25                     基础保留比例 25%
+#   DUMP_BUDGET=1                    开启 dump 模式（零开销保证：不设则完全不执行）
+#   DUMP_BUDGET_DIR=./budget_data/   输出目录
+#   DUMP_BUDGET_FILTER=./degraded_video_ids.txt
+#                                    白名单，只处理这 139 个视频，其他样本跳过
+#
+# --limit 64：只跑前 64 道题验证白名单生效（8 卡每张 ≥8 道，避免 "no docs" 错误）
+source /mnt/cpfs/gaoyizhuo-20260417/setup_env.sh
+export COMPRESSOR=vidcom2 R_RATIO=0.25
+export DUMP_BUDGET=1 DUMP_BUDGET_DIR=./budget_data_32f/
+export DUMP_BUDGET_FILTER=./degraded_video_ids_32f.txt
+
+accelerate launch --num_processes=8 -m lmms_eval \
+  --model qwen3_vl \
+  --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,attn_implementation=flash_attention_2,max_num_frames=32 \
+  --tasks videomme \
+  --batch_size 1 \
+  --limit 64 \
+  --log_samples \
+  --log_samples_suffix dump_filter_test \
+  --output_path ./logs/
+
+================================================================
+【3b】验证 dump 是否正确
+================================================================
+# 应该看到 log 里打印了 FILTER 激活信息：
+#   [DUMP_BUDGET_FILTER] only processing 139 videoIDs from ./degraded_video_ids.txt
+#
+# 遍历所有 budget.json，打印 scales 长度和 frame_tokens
+python -c "
+import json, glob
+for p in sorted(glob.glob('budget_data/*/budget.json')):
+    d = json.load(open(p))
+    print(f'{p}: scales长度={len(d[\"scales\"])}, frame_tokens={d[\"frame_tokens\"]}')
+"
+
+# 列出部分帧图片，确认文件生成了
+ls budget_data/*/frame_*.jpg | head -10
+
+# 随便拉一张到本地肉眼看（不是全白就正常）
+# 本地跑：scp gaoyizhuo-20260417@epic-02:/mnt/cpfs/gaoyizhuo-20260417/VidCom2/budget_data/<videoID>/frame_000.jpg ./
+
+================================================================
+【3c】全量 dump 139 个退化视频（带 FILTER）
+================================================================
+# 跑全量 Video-MME（~900 题），但 FILTER 让只有 139 个白名单视频过推理
+# 其他 ~760 道题秒过，139 个视频在 64 帧 + 8 卡下预计 1-1.5 小时
+#
+# setsid + disown 让命令脱离终端，断开 SSH 也不会停
+# 不需要 --limit，FILTER 自己筛选
+
+setsid bash -c '
+source /mnt/cpfs/gaoyizhuo-20260417/setup_env.sh
+export COMPRESSOR=vidcom2 R_RATIO=0.25
+export DUMP_BUDGET=1 DUMP_BUDGET_DIR=./budget_data_32f/
+export DUMP_BUDGET_FILTER=./degraded_video_ids_32f.txt
+accelerate launch --num_processes=8 \
+  -m lmms_eval \
+  --model qwen3_vl \
+  --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,attn_implementation=flash_attention_2,max_num_frames=32 \
+  --tasks videomme \
+  --batch_size 1 \
+  --log_samples \
+  --log_samples_suffix dump_budget_degraded_32f \
+  --output_path ./logs/
+' > run_dump_budget.log 2>&1 < /dev/null & disown
+
+# 查看进度：
+# tail -f run_dump_budget.log
+# 确认 139 个视频都 dump 好了：
+# ls budget_data/ | wc -l   # 期望值：139（或接近，可能个别视频在 Video-MME 中出现多次）
+
+================================================================
+【3d】构造 plot_config.json（一份 config 包含全部视频）
+================================================================
+# 遍历 budget_data/ 下所有含 budget.json 的子目录，
+# 把每个视频的 scales 写进一份 plot_config.json，供【4】可视化使用
+python build_plot_config.py \
+  --root ./budget_data_32f \
+  --out  ./budget_data_32f/plot_config.json
+
+================================================================
+【4】可视化（不需要 GPU）
+================================================================
+# budget_data/ 里只有 139 个退化视频的数据，build_plot_config.py 生成的
+# config 自然也只含这 139 项，--video_ids 不传即默认画全部
+# MPLBACKEND=Agg：强制 matplotlib 用纯文件渲染后端，无头服务器上必须加
+MPLBACKEND=Agg python plot_budget_overlay_template.py \
+  --config       ./budget_data_32f/plot_config.json \
+  --picture_root ./budget_data_32f \
+  --out_dir      ./vis_out_32f

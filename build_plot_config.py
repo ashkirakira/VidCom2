@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Build plot_config.json from a set of <video_id>/budget.json directories.
+"""Build plot_config.json from three method directories.
+
+Each directory contains <video_id>/budget.json with a "scales" array.
+The output JSON merges all three into a 4-curve config (Uniform + 3 methods).
 
 Usage:
-    python build_plot_config.py --root ./0ay2Qy3wBe8 --out ./plot_config.json
-    python build_plot_config.py --root ./budget_data --out ./budget_data/plot_config.json
+    python build_plot_config.py \
+        --root_g ./videomme_64f_g \
+        --root_l ./videomme_64f_l \
+        --root_gl ./videomme_64f_g_l_norm \
+        --picture_root ./budget_data_64f \
+        --out ./plot_config_4curve.json
 """
 
 from __future__ import annotations
@@ -13,46 +20,71 @@ import json
 from pathlib import Path
 
 
-def iter_case_dirs(root: Path) -> list[Path]:
-    # 如果 root 本身就是一个 case（含 budget.json），就只处理这一个；否则遍历子目录
-    if (root / "budget.json").exists():
-        return [root]
-    return sorted(p for p in root.iterdir() if p.is_dir() and (p / "budget.json").exists())
+def video_ids_in(root: Path) -> set[str]:
+    """返回目录下所有含 budget.json 的子目录名（即 video ID）。"""
+    return {p.parent.name for p in root.glob("*/budget.json")}
 
 
-def build_case(case_dir: Path, picture_root: Path) -> dict:
-    # 读每个视频的 scales，写进 curves.VidCom2；Uniform 脚本会自动补 0.25
-    data = json.loads((case_dir / "budget.json").read_text())
-    scales = data["scales"]
-    # image_dir 写成相对 picture_root 的相对路径，方便迁到服务器
-    rel = case_dir.relative_to(picture_root) if case_dir != picture_root else Path(case_dir.name)
+def load_scales(root: Path, video_id: str) -> list[float]:
+    """从指定目录的 video_id/budget.json 中读取 scales 数组。"""
+    data = json.loads((root / video_id / "budget.json").read_text())
+    return data["scales"]
+
+
+def build_case(
+    video_id: str,
+    root_g: Path,
+    root_l: Path,
+    root_gl: Path,
+) -> dict:
+    """为一个视频构建 case 配置，包含三条方法曲线。"""
     return {
-        "id": case_dir.name,
-        "image_dir": str(rel),
-        "curves": {"VidCom2": scales},
+        "id": video_id,
+        "image_dir": video_id,
+        "curves": {
+            "Global Uniqueness": load_scales(root_g, video_id),
+            "Local Variation": load_scales(root_l, video_id),
+            "Global+Local": load_scales(root_gl, video_id),
+        },
     }
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root", type=Path, required=True, help="包含多个 <id>/budget.json 的目录，或单个 case 目录")
+    ap = argparse.ArgumentParser(description="从三个方法目录生成 4 曲线 plot_config.json")
+    ap.add_argument("--root_g", type=Path, required=True, help="Global Uniqueness 目录")
+    ap.add_argument("--root_l", type=Path, required=True, help="Local Variation 目录")
+    ap.add_argument("--root_gl", type=Path, required=True, help="Global+Local 目录")
+    ap.add_argument("--picture_root", type=Path, default=None, help="图片帧根目录（写入 JSON 供绘图脚本使用）")
     ap.add_argument("--out", type=Path, required=True, help="输出 plot_config.json 路径")
-    ap.add_argument("--picture_root", type=Path, default=None, help="画图时的 picture_root；默认等于 --root 的父目录")
     args = ap.parse_args()
 
-    case_dirs = iter_case_dirs(args.root)
-    if not case_dirs:
-        raise SystemExit(f"No budget.json found under {args.root}")
+    ids_g = video_ids_in(args.root_g)
+    ids_l = video_ids_in(args.root_l)
+    ids_gl = video_ids_in(args.root_gl)
+    common = sorted(ids_g & ids_l & ids_gl)
 
-    # 单 case 模式下 picture_root 用 root 自身的父目录
-    picture_root = args.picture_root or (args.root if args.root != case_dirs[0] else args.root.parent)
-    cases = [build_case(cd, picture_root) for cd in case_dirs]
+    if not common:
+        raise SystemExit(
+            f"No common video IDs found.\n"
+            f"  root_g: {len(ids_g)} videos\n"
+            f"  root_l: {len(ids_l)} videos\n"
+            f"  root_gl: {len(ids_gl)} videos"
+        )
+
+    cases = [build_case(vid, args.root_g, args.root_l, args.root_gl) for vid in common]
 
     cfg = {
         "figure": {"width": 32.0, "curve_strip_height": 0.53, "image_stretch_h": 1.2},
-        "curve_order": ["Uniform", "VidCom2"],
+        "curve_order": ["Uniform", "Global Uniqueness", "Local Variation", "Global+Local"],
+        "colors": {
+            "Uniform": "#A9A9A9",
+            "Global Uniqueness": "#6BB983",
+            "Local Variation": "#E8845C",
+            "Global+Local": "#5B8BD4",
+        },
         "cases": cases,
     }
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(cfg, indent=2))
     print(f"wrote {args.out} with {len(cases)} case(s)")
