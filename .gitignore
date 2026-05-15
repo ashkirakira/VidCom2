@@ -60,3 +60,5 @@ vis_out_32f_with_q/
 *.pdf
 *.png
 *.jpg
+
+videomme_64f*/
