@@ -29,44 +29,29 @@ _current_video_id: Optional[str] = None
 
 def _compute_keep_indices(
     flat_features: Tensor, grid_thw: Tensor, spatial_merge_size: int, base_scale: float
-) -> Tuple[Tensor, Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor], Optional[Tensor]]:
-    """Runs VidCom2 scoring; returns (kept_indices, scales, raw + 6 norm variants)."""
+) -> Tuple[Tensor, Optional[Tensor]]:
+    """Runs VidCom2 scoring; returns (kept_indices, per_frame_scales)."""
     t, h, w = grid_thw.tolist()
     frame_tokens = (h * w) // (spatial_merge_size ** 2)
     if frame_tokens <= 0 or flat_features.numel() == 0:
-        return torch.arange(flat_features.shape[0], device=flat_features.device), None, None, None, None, None, None, None, None, None
+        return torch.arange(flat_features.shape[0], device=flat_features.device), None
 
     sel_feat = select_low_var_channels(flat_features)
     vid_score, frame_score = compute_gaussian_scores(sel_feat, frame_tokens)
 
     local_variation = -compute_local_variation(sel_feat, frame_tokens).squeeze(-1)
-    local_variation_norm_l2 = F.normalize(local_variation, p=2, dim=0)
-    local_variation_z_score = (local_variation - local_variation.mean()) / (local_variation.std() + 1e-8)
-    local_variation_norm_minmax = (local_variation - local_variation.min()) / (local_variation.max() - local_variation.min() + 1e-8)
+    local_variation_norm = (local_variation - local_variation.min()) / (local_variation.max() - local_variation.min() + 1e-8)
 
-    global_uniqueness = -vid_score.mean(dim=-1)
-    global_uniqueness_norm_l2 = F.normalize(global_uniqueness, p=2, dim=0)
-    global_uniqueness_z_score = (global_uniqueness - global_uniqueness.mean()) / (global_uniqueness.std() + 1e-8)
-    global_uniqueness_norm_minmax = (global_uniqueness - global_uniqueness.min()) / (global_uniqueness.max() - global_uniqueness.min() + 1e-8)
+    scales = compute_scales(local_variation_norm, base_scale, temp=0.15)
 
-    combined_tail = (global_uniqueness_norm_l2[1:] + local_variation_norm_l2) / 2
-    frame_budgeting = torch.cat([global_uniqueness_norm_l2[0:1], combined_tail])
+    prefix = torch.full((1,), base_scale, device=scales.device, dtype=scales.dtype)
+    scales = torch.cat([prefix, scales], dim=0)
 
-    scales = compute_scales(frame_budgeting, base_scale)
     indices = select_outlier_indices(vid_score + frame_score, scales, frame_tokens)
     return (
         _map_linear_offset(indices, frame_tokens),
         scales,
-        local_variation,
-        local_variation_norm_l2,
-        local_variation_z_score,
-        local_variation_norm_minmax,
-        global_uniqueness,
-        global_uniqueness_norm_l2,
-        global_uniqueness_z_score,
-        global_uniqueness_norm_minmax,
     )
-
 
 def Qwen3VLModel_forward(
     self,
@@ -183,21 +168,9 @@ def Qwen3VLModel_forward(
         dump_enabled = bool(os.getenv("DUMP_BUDGET"))
         dump_scales: List[float] = []
         dump_frame_tokens = 0
-        dump_lv_l2: List[float] = []
-        dump_lv_z: List[float] = []
-        dump_lv_mm: List[float] = []
-        dump_gu_l2: List[float] = []
-        dump_gu_z: List[float] = []
-        dump_gu_mm: List[float] = []
-        dump_lv_raw: List[float] = []
-        dump_gu_raw: List[float] = []
 
         for grid, feat in zip(video_grid_thw, video_splits):
-            (
-                keep_local, seg_scales,
-                lv_raw, lv_l2, lv_z, lv_mm,
-                gu_raw, gu_l2, gu_z, gu_mm,
-            ) = _compute_keep_indices(
+            keep_local, seg_scales = _compute_keep_indices(
                 flat_features=feat,
                 grid_thw=grid,
                 spatial_merge_size=merge_size,
@@ -211,14 +184,6 @@ def Qwen3VLModel_forward(
 
             if dump_enabled and seg_scales is not None:
                 dump_scales.extend(seg_scales.cpu().tolist())
-                dump_lv_raw.extend(lv_raw.cpu().tolist())
-                dump_lv_l2.extend(lv_l2.cpu().tolist())
-                dump_lv_z.extend(lv_z.cpu().tolist())
-                dump_lv_mm.extend(lv_mm.cpu().tolist())
-                dump_gu_raw.extend(gu_raw.cpu().tolist())
-                dump_gu_l2.extend(gu_l2.cpu().tolist())
-                dump_gu_z.extend(gu_z.cpu().tolist())
-                dump_gu_mm.extend(gu_mm.cpu().tolist())
                 h, w = grid[1].item(), grid[2].item()
                 dump_frame_tokens = (h * w) // (merge_size ** 2)
 
@@ -232,14 +197,6 @@ def Qwen3VLModel_forward(
                     "ks": ks,
                     "frame_tokens": dump_frame_tokens,
                     "r_ratio": base_scale,
-                    "local_variation": dump_lv_raw,
-                    "local_variation_norm_l2": dump_lv_l2,
-                    "local_variation_z_score": dump_lv_z,
-                    "local_variation_norm_minmax": dump_lv_mm,
-                    "global_uniqueness": dump_gu_raw,
-                    "global_uniqueness_norm_l2": dump_gu_l2,
-                    "global_uniqueness_z_score": dump_gu_z,
-                    "global_uniqueness_norm_minmax": dump_gu_mm,
                 }, f, indent=2)
 
         kept_indices = torch.sort(torch.cat(kept_indices)).values
