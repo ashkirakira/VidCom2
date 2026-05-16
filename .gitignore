@@ -62,3 +62,4 @@ vis_out_32f_with_q/
 *.jpg
 
 videomme_64f*/
+vis_out_*/
