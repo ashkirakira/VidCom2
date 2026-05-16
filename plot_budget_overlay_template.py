@@ -204,6 +204,13 @@ def plot_case_curve(
     x = np.arange(num_frames, dtype=float)
     x_aug = np.concatenate(([-0.5], x, [num_frames - 0.5]))
 
+    LEGEND_LABELS: Dict[str, str] = {
+        "Uniform": "Baseline",
+        "Global Uniqueness": "Global",
+        "Local Variation": "Local",
+        "Global+Local": "Global+Local",
+    }
+
     ymax_parts = []
     for zorder, name in enumerate(curve_order, start=1):
         vals = curves[name]
@@ -220,13 +227,28 @@ def plot_case_curve(
             linewidth=style["linewidth"],
             linestyle=style["linestyle"],
             zorder=zorder + len(curve_order) + 1,
+            label=LEGEND_LABELS.get(name, name),
         )
 
     ymax = np.nanmax(np.concatenate(ymax_parts))
     pad_up = max(0.02, 0.06 * (ymax + 1e-8))
     ax.set_xlim(-0.5, num_frames - 0.5)
     ax.set_ylim(0.0, min(1.0, ymax + pad_up))
-    ax.axis("off")
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["bottom"].set_visible(False)
+    ax.yaxis.set_visible(True)
+    ax.xaxis.set_visible(False)
+    ax.tick_params(axis="y", labelsize=7, length=3)
+
+    ax.legend(
+        loc="upper right",
+        fontsize=6,
+        framealpha=0.7,
+        edgecolor="none",
+        ncol=len(curve_order),
+    )
 
 
 def plot_case_images(
