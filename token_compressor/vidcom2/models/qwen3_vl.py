@@ -11,6 +11,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 from token_compressor.vidcom2 import (
     select_low_var_channels,
     compute_gaussian_scores,
+    compute_local_variation,
     compute_scales,
     select_outlier_indices,
     _map_linear_offset,
@@ -28,7 +29,17 @@ def _compute_keep_indices(
 
     sel_feat = select_low_var_channels(flat_features)
     vid_score, frame_score = compute_gaussian_scores(sel_feat, frame_tokens)
-    scales = compute_scales(-vid_score.mean(dim=-1), base_scale)
+    local_variation = -compute_local_variation(sel_feat, frame_tokens).squeeze(-1)
+    local_variation_norm = (local_variation - local_variation.min()) / (local_variation.max() - local_variation.min() + 1e-8)
+    
+    global_uniqueness = -vid_score.mean(dim=-1)
+    global_uniqueness_norm = (global_uniqueness - global_uniqueness.min()) / (global_uniqueness.max() - global_uniqueness.min() + 1e-8)
+    
+    combined_tail = (global_uniqueness_norm[1:] + local_variation_norm) / 2
+    frame_budgeting = torch.cat([global_uniqueness_norm[0:1], combined_tail])
+
+    scales = compute_scales(frame_budgeting, base_scale, temp=0.15)
+    
     indices = select_outlier_indices(vid_score + frame_score, scales, frame_tokens)
     return _map_linear_offset(indices, frame_tokens)
 
