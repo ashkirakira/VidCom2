@@ -28,7 +28,11 @@ def _compute_keep_indices(
 
     sel_feat = select_low_var_channels(flat_features)
     vid_score, frame_score = compute_gaussian_scores(sel_feat, frame_tokens)
-    scales = compute_scales(-vid_score.mean(dim=-1), base_scale)
+
+    global_uniqueness = -vid_score.mean(dim=-1)
+    global_uniqueness_norm = (global_uniqueness - global_uniqueness.min()) / (global_uniqueness.max() - global_uniqueness.min() + 1e-8)
+    scales = compute_scales(global_uniqueness_norm, base_scale, temp=0.15)
+
     indices = select_outlier_indices(vid_score + frame_score, scales, frame_tokens)
     return _map_linear_offset(indices, frame_tokens)
 
