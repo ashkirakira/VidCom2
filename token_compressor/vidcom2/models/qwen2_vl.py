@@ -40,7 +40,7 @@ def Qwen2VL_ViT_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
     base_scale = float(os.getenv('R_RATIO', '0.25'))
     
     frame_token_lenth=token_per_frame
-    keep_index=vidcom2_compression(flattened_feat=merged_hidden_states,model=model,base_scale=base_scale,frame_token_len=frame_token_lenth)
+    keep_index=vidcom2_compression(flattened_feat=merged_hidden_states,model=model,base_scale=base_scale,frame_token_len=frame_token_lenth,frame_width=int(resize_w))
     return merged_hidden_states,keep_index
 
 def Qwen2VLGeneration_forward(
