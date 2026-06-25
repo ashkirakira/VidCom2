@@ -13,7 +13,7 @@ from token_compressor.vidcom2 import (
     compute_gaussian_scores,
     compute_local_variation,
     compute_scales,
-    select_outlier_indices,
+    select_backbone_per_frame,
     _map_linear_offset,
 )
 
@@ -38,9 +38,11 @@ def _compute_keep_indices(
     combined_tail = (global_uniqueness_norm[1:] + local_variation_norm) / 2
     frame_budgeting = torch.cat([global_uniqueness_norm[0:1], combined_tail])
 
+    # Backbone-only selection: each frame keeps a uniform 2D-grid of tokens, with the
+    # per-frame ratio set by frame budgeting (no outlier selection).
+    frame_width = w // spatial_merge_size
     scales = compute_scales(frame_budgeting, base_scale, temp=0.15)
-    
-    indices = select_outlier_indices(vid_score + frame_score, scales, frame_tokens)
+    indices = select_backbone_per_frame(scales, frame_tokens, frame_width, flat_features.device)
     return _map_linear_offset(indices, frame_tokens)
 
 

@@ -14,14 +14,17 @@ MODEL_SPECS = {
 
 def vidcom2_compression(flattened_feat: torch.Tensor, model: str = "llava_ov",
                         base_scale: float = 0.25, frame_token_len: Optional[int] = None,
-                        img_feat: Optional[torch.Tensor] = None) -> torch.Tensor:
+                        img_feat: Optional[torch.Tensor] = None,
+                        frame_width: Optional[int] = None) -> torch.Tensor:
     """Compression pipeline supporting llava_ov, llava_vid, qwen2_vl, qwen2_5_vl, and qwen3_vl."""
     if model not in MODEL_SPECS: raise ValueError(f"Unknown model: {model}")
-    
+
     spec = MODEL_SPECS[model]
     # Use dynamic tpf for qwen2_vl/qwen2_5_vl/qwen3_vl, else use constant from spec
     tpf = frame_token_len if model in {"qwen2_vl", "qwen2_5_vl", "qwen3_vl"} else spec["tpf"]
     if tpf is None: raise ValueError(f"frame_token_len required for {model}")
+    # Frame grid width (square LLaVA frames default to sqrt(tpf); Qwen passes real width)
+    fw = frame_width if frame_width is not None else round(tpf ** 0.5)
 
     # 1. Feature Analysis (Vectorized Gaussian Scores)
     sel_feat = select_low_var_channels(flattened_feat)
@@ -35,10 +38,10 @@ def vidcom2_compression(flattened_feat: torch.Tensor, model: str = "llava_ov",
     combined_tail = (global_uniqueness_norm[1:] + local_variation_norm) / 2
     frame_budgeting = torch.cat([global_uniqueness_norm[0:1], combined_tail]) # the more unique, the higher the frame_budgeting
 
-    # 2. Score Fusion & Selection (Hardcoded: Outlier Retention)
-    # Strategy: Keep tokens different from both Global Video Mean and Local Frame Mean
+    # 2. Selection (backbone-only): each frame keeps a uniform 2D-grid of tokens,
+    # with the per-frame ratio set by frame budgeting (no outlier selection).
     scales = compute_scales(frame_budgeting, base_scale, temp=0.15)
-    indices = select_outlier_indices(vid_score + frame_score, scales, tpf)
+    indices = select_backbone_per_frame(scales, tpf, fw, flattened_feat.device)
 
     # 3. Index Mapping (Routes to linear or grid mapper)
     return map_features(indices, flattened_feat, img_feat, spec)
@@ -83,6 +86,29 @@ def compute_scales(scores: torch.Tensor, base: float, temp: float = 0.01) -> tor
     scales = base * (1 + probs - probs.mean())
     return scales.clamp(max=1.0)
 
+def select_backbone_indices(tpf: int, frame_width: int, ratio: float,
+                            device: torch.device) -> torch.Tensor:
+    """Uniformly retains ~ratio*tpf tokens via 2D-grid subsampling.
+
+    The frame is an (H x W) token grid (flat index t -> row t//W, col t%W). We keep
+    n_h = round(H*sqrt(ratio)) evenly-spaced rows and n_w = round(W*sqrt(ratio))
+    evenly-spaced columns, then their grid intersection (~H*W*ratio tokens). At
+    ratio=0.25 this is exactly the top-left token of every 2x2 block.
+    """
+    h = max(1, tpf // frame_width)
+    side = ratio ** 0.5
+    n_h = max(1, min(h, round(h * side)))
+    n_w = max(1, min(frame_width, round(frame_width * side)))
+    rows = (torch.arange(n_h, device=device) * h) // n_h
+    cols = (torch.arange(n_w, device=device) * frame_width) // n_w
+    grid = rows.unsqueeze(1) * frame_width + cols.unsqueeze(0)
+    return grid.flatten().sort().values
+
+def select_backbone_per_frame(scales: torch.Tensor, tpf: int, frame_width: int,
+                              device: torch.device) -> List[torch.Tensor]:
+    """Per-frame backbone selection; frame i keeps a 2D grid of ~scales[i]*tpf tokens."""
+    return [select_backbone_indices(tpf, frame_width, float(r), device) for r in scales]
+
 def select_outlier_indices(scores: torch.Tensor, scales: torch.Tensor, tpf: int) -> List[torch.Tensor]:
     """Selects top-k indices with lowest similarity (largest outliers)."""
     ks = (scales * tpf).round().long().clamp(min=1).tolist()
@@ -90,7 +116,7 @@ def select_outlier_indices(scores: torch.Tensor, scales: torch.Tensor, tpf: int)
     for i, k in enumerate(ks):
         # largest=False -> retain most distinct tokens
         _, idx = torch.topk(scores[i], k=k, largest=False, sorted=False)
-        batch_indices.append(idx.sort().values) 
+        batch_indices.append(idx.sort().values)
     return batch_indices
 
 def map_features(indices: List[torch.Tensor], flat: torch.Tensor, 
